@@ -1,0 +1,31 @@
+18:58:28 [INFO ] init | start | force=undefined project=auto-detect
+18:58:28 [ERROR] init | fatal | error=User force closed the prompt with 0 null
+18:58:31 [INFO ] init | start | force=undefined project=auto-detect
+18:58:31 [INFO ] init | update_check | available=true current=0.2.58 latest=0.2.65
+18:58:31 [INFO ] init | git_check | installed=true
+18:58:31 [INFO ] init | gh_check | installed=true
+18:58:31 [INFO ] init | jq_check | installed=true
+18:58:31 [INFO ] init | auth_check | authenticated=true
+18:58:32 [INFO ] init | project_found | id=PROJ-3 name=lumina-reader
+18:58:32 [ERROR] init | fatal | error=User force closed the prompt with 0 null
+18:58:35 [INFO ] init | start | force=undefined project=auto-detect
+18:58:52 [INFO ] init | start | force=undefined project=auto-detect
+18:58:52 [INFO ] init | update_check | available=true current=0.2.58 latest=0.2.65
+18:58:53 [INFO ] init | git_check | installed=true
+18:58:53 [INFO ] init | gh_check | installed=true
+18:58:53 [INFO ] init | jq_check | installed=true
+18:58:53 [INFO ] init | auth_check | authenticated=true
+18:58:53 [INFO ] init | project_found | id=PROJ-3 name=lumina-reader
+18:58:53 [ERROR] init | fatal | error=User force closed the prompt with 0 null
+18:59:00 [INFO ] init | start | force=undefined project=auto-detect
+18:59:00 [INFO ] init | update_check | available=true current=0.2.58 latest=0.2.65
+18:59:00 [INFO ] init | git_check | installed=true
+18:59:00 [INFO ] init | gh_check | installed=true
+18:59:00 [INFO ] init | jq_check | installed=true
+18:59:00 [INFO ] init | auth_check | authenticated=true
+18:59:00 [INFO ] init | project_found | id=PROJ-3 name=lumina-reader
+18:59:00 [ERROR] init | fatal | error=User force closed the prompt with 0 null
+18:59:14 [INFO ] init | start | force=true project=PROJ-3
+18:59:14 [ERROR] init | fatal | error=User force closed the prompt with 0 null
+18:59:39 [INFO ] init | start | force=true project=PROJ-3
+18:59:39 [ERROR] init | fatal | error=User force closed the prompt with 0 null

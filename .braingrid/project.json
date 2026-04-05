@@ -1,0 +1,15 @@
+{
+  "organization_id": "ce2610f8-aa97-4102-b421-32d0aed7143a",
+  "project_id": "c32a1557-9773-444b-9ced-3f7c12fea547",
+  "project_short_id": "PROJ-3",
+  "project_name": "lumina-reader",
+  "project_description": "Universal AI Reader + Source-Anchored Intelligence Platform",
+  "repository": {
+    "id": "63178087-338d-4f81-8ee7-8ad5659a60c0",
+    "owner": "jotay076-wq",
+    "name": "lumina-reader",
+    "full_name": "jotay076-wq/lumina-reader",
+    "url": "https://github.com/jotay076-wq/lumina-reader.git"
+  },
+  "created_at": "2026-04-05T22:30:16.372Z"
+}

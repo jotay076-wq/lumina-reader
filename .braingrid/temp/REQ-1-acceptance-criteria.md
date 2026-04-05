@@ -1,0 +1,15 @@
+## Acceptance Criteria
+- [] Given a valid YouTube URL is submitted, When the ingest API is called, Then a `content_items` record is created with `content_type = youtube`, `status = complete`, and `extracted_text` populated with the video's caption text
+- [] Given a YouTube URL with no available captions, When the ingest API is called, Then the record is created with `status = error` and `error_code = TRANSCRIPT_UNAVAILABLE`
+- [] Given a valid website URL is submitted, When the ingest API is called, Then a `content_items` record is created with `content_type = website`, `status = complete`, and `extracted_text` containing the page's body text
+- [] Given a PDF file is uploaded, When the ingest API is called, Then the file is stored in Supabase Storage and a `content_items` record is created with `content_type = pdf`, `status = complete`, and `extracted_text` populated
+- [] Given an audio file is uploaded, When the ingest API is called, Then the file is stored in Supabase Storage, Groq Whisper is called, and `transcript_segments` rows are created with `start_seconds` and `text` for each segment
+- [] Given an EPUB file is uploaded, When the ingest API is called, Then `ebook_chapters` rows are created with `chapter_index`, `title`, and `text` for each chapter
+- [] Given a file larger than 50 MB is uploaded, When the ingest API is called, Then a `422` response is returned with `error = FILE_TOO_LARGE`
+- [] Given an unrecognized URL or file type is submitted, When the ingest API is called, Then a `422` response is returned with `error = UNSUPPORTED_TYPE`
+- [] Given no session exists, When a user visits the home page, Then an anonymous Supabase session is created automatically and subsequent ingest calls are scoped to that anonymous `user_id`
+- [] Given an anonymous user signs up, When sign-up completes, Then content items created during the anonymous session are accessible under the new authenticated account
+- [] Given a `contentId` for a completed item, When `/reader/[contentId]` is visited, Then the confirmation page displays the content type, title/URL, first 500 characters of extracted text, and a "Processing complete" status badge
+- [] Given a `contentId` for an audio item still being transcribed, When `/reader/[contentId]` is visited, Then the page displays a "Transcribing…" status and the extracted text area is empty
+- [] Given the reader route is loaded, When the page renders, Then the left panel displays source content and the right panel displays the AI tools dock in its initial (pre-AI) state
+- [] Given the home page is loaded, When it renders, Then a single prominent input bar is the visually dominant element and no content list is shown to anonymous users
