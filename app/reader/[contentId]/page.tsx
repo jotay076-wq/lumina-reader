@@ -764,22 +764,25 @@ function AiDock({
         />
       )}
 
-      {activeTab !== 'summary' && (
+      {activeTab === 'qa' && (
+        <QaTab
+          contentId={data.contentId}
+          jumpToTimestamp={jumpToTimestamp}
+          jumpToParagraph={jumpToParagraph}
+        />
+      )}
+
+      {activeTab === 'read-aloud' && (
         <div style={{
           border: '1px dashed var(--border)', borderRadius: '12px', padding: '32px',
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
           gap: '10px', textAlign: 'center',
         }}>
-          <span style={{ fontSize: '24px' }}>{activeTab === 'qa' ? '💬' : '🔊'}</span>
-          <p style={{ fontSize: '14px', fontWeight: 500 }}>
-            {activeTab === 'qa' ? 'Ask a Question' : 'Read Aloud'}
-          </p>
+          <span style={{ fontSize: '24px' }}>🔊</span>
+          <p style={{ fontSize: '14px', fontWeight: 500 }}>Read Aloud</p>
           <p style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5 }}>
-            {activeTab === 'qa' ? 'Source-anchored Q&A coming in REQ-3.' : 'Text-to-speech narration coming in REQ-4.'}
+            Text-to-speech narration coming in REQ-4.
           </p>
-          <div style={{ marginTop: '8px', padding: '8px 14px', borderRadius: '9px', background: 'var(--surface-2)', fontSize: '11px', color: 'var(--muted)' }}>
-            Content: {data.contentType} · {(data.extractedText ?? '').length.toLocaleString()} chars extracted
-          </div>
         </div>
       )}
     </div>
@@ -961,4 +964,287 @@ function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+// ─── Q&A Tab ──────────────────────────────────────────────────────────────────
+
+interface QaMessage {
+  messageId: string
+  question: string
+  answer: string | null
+  anchors: Array<{ type: 'timestamp'; start_seconds: number; sequence: number } | { type: 'paragraph'; paragraph_index: number }>
+  createdAt: string
+}
+
+// Pending message shown optimistically while the answer loads
+interface PendingMessage {
+  question: string
+  state: 'loading' | 'error'
+  retryFn?: () => void
+}
+
+function QaTab({
+  contentId,
+  jumpToTimestamp,
+  jumpToParagraph,
+}: {
+  contentId: string
+  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToParagraph: (paragraphIndex: number) => void
+}) {
+  const [messages, setMessages] = useState<QaMessage[]>([])
+  const [pending, setPending] = useState<PendingMessage | null>(null)
+  const [input, setInput] = useState('')
+  const [charCount, setCharCount] = useState(0)
+  const threadRef = useRef<HTMLDivElement>(null)
+
+  // Restore history on mount
+  useEffect(() => {
+    fetch(`/api/qa/${contentId}`)
+      .then((r) => r.ok ? r.json() : { messages: [] })
+      .then((data) => {
+        if (Array.isArray(data.messages)) setMessages(data.messages)
+      })
+      .catch(() => {})
+  }, [contentId])
+
+  // Auto-scroll to bottom when messages or pending changes
+  useEffect(() => {
+    if (threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight
+    }
+  }, [messages, pending])
+
+  function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    setInput(e.target.value)
+    setCharCount(e.target.value.length)
+  }
+
+  async function submitQuestion(question: string) {
+    const trimmed = question.trim()
+    if (!trimmed || pending) return
+
+    setInput('')
+    setCharCount(0)
+
+    async function doSubmit() {
+      setPending({ question: trimmed, state: 'loading' })
+      try {
+        const res = await fetch('/api/qa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contentId, question: trimmed }),
+        })
+        if (!res.ok) {
+          setPending({ question: trimmed, state: 'error', retryFn: doSubmit })
+          return
+        }
+        const msg: QaMessage = await res.json()
+        setMessages((prev) => [...prev, msg])
+        setPending(null)
+      } catch {
+        setPending({ question: trimmed, state: 'error', retryFn: doSubmit })
+      }
+    }
+
+    await doSubmit()
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      submitQuestion(input)
+    }
+  }
+
+  const isInFlight = pending?.state === 'loading'
+  const sendDisabled = !input.trim() || isInFlight
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '500px' }}>
+      {/* Thread */}
+      <div
+        ref={threadRef}
+        style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '8px' }}
+      >
+        {messages.length === 0 && !pending && (
+          <div style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '32px 16px', textAlign: 'center',
+          }}>
+            <p style={{ fontSize: '13px', color: 'var(--muted)', lineHeight: 1.6, maxWidth: '240px' }}>
+              Ask anything about this content. Every answer links back to the source.
+            </p>
+          </div>
+        )}
+
+        {messages.map((msg) => (
+          <QaMessagePair
+            key={msg.messageId}
+            msg={msg}
+            jumpToTimestamp={jumpToTimestamp}
+            jumpToParagraph={jumpToParagraph}
+          />
+        ))}
+
+        {pending && (
+          <>
+            {/* Question bubble */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <div style={{
+                maxWidth: '80%', padding: '10px 14px', borderRadius: '12px 12px 4px 12px',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                fontSize: '13px', lineHeight: 1.5,
+              }}>
+                {pending.question}
+              </div>
+            </div>
+
+            {/* Answer card: loading or error */}
+            {pending.state === 'loading' && (
+              <div style={{
+                padding: '12px 14px', borderRadius: '12px 12px 12px 4px',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}>
+                <span style={{ color: 'var(--accent)', fontSize: '18px', letterSpacing: '4px', animation: 'pulse 1.2s ease-in-out infinite' }}>•••</span>
+                <style>{`@keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }`}</style>
+              </div>
+            )}
+            {pending.state === 'error' && (
+              <div style={{
+                padding: '12px 14px', borderRadius: '12px 12px 12px 4px',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                display: 'flex', flexDirection: 'column', gap: '8px',
+              }}>
+                <p style={{ fontSize: '13px', color: 'var(--muted)' }}>Couldn't get an answer. Tap Retry.</p>
+                <button
+                  onClick={() => pending.retryFn?.()}
+                  style={{
+                    alignSelf: 'flex-start', padding: '4px 12px', borderRadius: '6px',
+                    border: '1px solid var(--border)', background: 'var(--surface)',
+                    color: 'var(--accent)', fontSize: '12px', fontWeight: 500, cursor: 'pointer',
+                  }}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Input area */}
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: '12px', flexShrink: 0 }}>
+        <div style={{ position: 'relative' }}>
+          <textarea
+            value={input}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            disabled={isInFlight}
+            maxLength={500}
+            rows={2}
+            placeholder="Ask a question about this content…"
+            style={{
+              width: '100%', resize: 'none', padding: '10px 50px 10px 12px',
+              borderRadius: '10px', border: '1px solid var(--border)',
+              background: 'var(--surface-2)', color: 'var(--text)',
+              fontSize: '13px', lineHeight: 1.5, fontFamily: 'inherit',
+              outline: 'none', boxSizing: 'border-box',
+            }}
+          />
+          <button
+            onClick={() => submitQuestion(input)}
+            disabled={sendDisabled}
+            style={{
+              position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)',
+              width: '32px', height: '32px', borderRadius: '8px', border: 'none',
+              background: sendDisabled ? 'var(--border)' : 'linear-gradient(135deg, hsl(258,75%,55%), hsl(258,70%,45%))',
+              color: 'white', fontSize: '14px', cursor: sendDisabled ? 'not-allowed' : 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+            aria-label="Send question"
+          >
+            ↑
+          </button>
+        </div>
+        {charCount >= 480 && (
+          <p style={{ fontSize: '11px', color: charCount > 490 ? 'var(--red, #ef4444)' : 'var(--muted)', marginTop: '4px', textAlign: 'right' }}>
+            {charCount}/500
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function QaMessagePair({
+  msg,
+  jumpToTimestamp,
+  jumpToParagraph,
+}: {
+  msg: QaMessage
+  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToParagraph: (paragraphIndex: number) => void
+}) {
+  return (
+    <>
+      {/* Question bubble — right aligned */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{
+          maxWidth: '80%', padding: '10px 14px', borderRadius: '12px 12px 4px 12px',
+          background: 'var(--surface-2)', border: '1px solid var(--border)',
+          fontSize: '13px', lineHeight: 1.5,
+        }}>
+          {msg.question}
+        </div>
+      </div>
+
+      {/* Answer card — left aligned */}
+      <div style={{
+        padding: '12px 14px', borderRadius: '12px 12px 12px 4px',
+        background: 'var(--surface-2)', border: '1px solid var(--border)',
+        display: 'flex', flexDirection: 'column', gap: '8px',
+      }}>
+        {msg.answer === null ? (
+          <p style={{ fontSize: '13px', color: 'var(--muted)', fontStyle: 'italic' }}>
+            I couldn't find an answer to that in this content.
+          </p>
+        ) : (
+          <>
+            <p style={{ fontSize: '13px', lineHeight: 1.6, color: 'var(--text)', margin: 0 }}>{msg.answer}</p>
+            {msg.anchors.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {msg.anchors.map((anchor, idx) => {
+                  const label = anchor.type === 'timestamp'
+                    ? formatTime(anchor.start_seconds)
+                    : `¶ ${anchor.paragraph_index + 1}`
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        if (anchor.type === 'timestamp') {
+                          jumpToTimestamp(anchor.start_seconds, anchor.sequence)
+                        } else {
+                          jumpToParagraph(anchor.paragraph_index)
+                        }
+                      }}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '4px',
+                        padding: '3px 9px', borderRadius: '6px', border: '1px solid var(--border)',
+                        background: 'var(--surface)', color: 'var(--accent)', fontSize: '11px',
+                        fontWeight: 500, cursor: 'pointer',
+                      }}
+                    >
+                      ↗ {label}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  )
 }
