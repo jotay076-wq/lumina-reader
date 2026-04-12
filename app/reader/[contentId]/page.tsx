@@ -1,8 +1,8 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
-import type { ContentType, ContentStatus, TranscriptSegment, EbookChapter } from '@/lib/types'
+import type { ContentType, ContentStatus, TranscriptSegment, EbookChapter, SummaryResponse } from '@/lib/types'
 
 interface ContentData {
   contentId: string
@@ -185,6 +185,96 @@ function ErrorState({ message }: { message: string }) {
 }
 
 function ReaderLayout({ data }: { data: ContentData }) {
+  const [summary, setSummary] = useState<SummaryResponse | null>(null)
+  const [summaryStatus, setSummaryStatus] = useState<'idle' | 'loading' | 'error'>('idle')
+  const summaryPollRef = useRef<NodeJS.Timeout | null>(null)
+  const leftPanelRef = useRef<HTMLDivElement>(null)
+  const playerRef = useRef<HTMLIFrameElement | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Fetch existing summary on mount
+  useEffect(() => {
+    fetch(`/api/summarize/${data.contentId}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((json: SummaryResponse | null) => {
+        if (!json) return
+        if (json.status === 'complete') {
+          setSummary(json)
+        } else if (json.status === 'processing') {
+          setSummaryStatus('loading')
+          startSummaryPoll(data.contentId)
+        } else if (json.status === 'error') {
+          setSummaryStatus('error')
+        }
+      })
+      .catch(() => {})
+    return () => { if (summaryPollRef.current) clearInterval(summaryPollRef.current) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.contentId])
+
+  function startSummaryPoll(contentId: string) {
+    if (summaryPollRef.current) clearInterval(summaryPollRef.current)
+    summaryPollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/summarize/${contentId}`)
+      if (!res.ok) return
+      const json: SummaryResponse = await res.json()
+      if (json.status === 'complete') {
+        clearInterval(summaryPollRef.current!)
+        setSummary(json)
+        setSummaryStatus('idle')
+      } else if (json.status === 'error') {
+        clearInterval(summaryPollRef.current!)
+        setSummaryStatus('error')
+      }
+    }, 2000)
+  }
+
+  async function triggerSummarize() {
+    setSummaryStatus('loading')
+    const res = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contentId: data.contentId }),
+    })
+    if (res.ok || res.status === 202) {
+      startSummaryPoll(data.contentId)
+    } else if (res.status === 409) {
+      // Summary exists — fetch it
+      const existing = await fetch(`/api/summarize/${data.contentId}`)
+      if (existing.ok) {
+        const json: SummaryResponse = await existing.json()
+        if (json.status === 'complete') { setSummary(json); setSummaryStatus('idle') }
+        else if (json.status === 'processing') startSummaryPoll(data.contentId)
+      }
+    } else {
+      setSummaryStatus('error')
+    }
+  }
+
+  const jumpToTimestamp = useCallback((startSeconds: number) => {
+    if (playerRef.current) {
+      playerRef.current.contentWindow?.postMessage(
+        JSON.stringify({ event: 'command', func: 'seekTo', args: [startSeconds, true] }),
+        '*'
+      )
+    }
+    if (audioRef.current) {
+      audioRef.current.currentTime = startSeconds
+    }
+    // Scroll transcript segment into view
+    const el = document.querySelector(`[data-sequence="${Math.round(startSeconds)}"]`) as HTMLElement | null
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el?.classList.add('pulse-highlight')
+    setTimeout(() => el?.classList.remove('pulse-highlight'), 1200)
+  }, [])
+
+  const jumpToParagraph = useCallback((paragraphIndex: number) => {
+    const el = document.querySelector(`[data-paragraph-index="${paragraphIndex}"]`) as HTMLElement | null
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el?.classList.add('pulse-highlight')
+    setTimeout(() => el?.classList.remove('pulse-highlight'), 1200)
+  }, [])
+
   return (
     <div style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
@@ -210,22 +300,31 @@ function ReaderLayout({ data }: { data: ContentData }) {
       </header>
 
       {/* Split panel */}
-      <div style={{
-        flex: 1, display: 'flex', gap: 0,
-        flexDirection: 'row',
-      }}>
+      <div style={{ flex: 1, display: 'flex', gap: 0, flexDirection: 'row' }}>
         {/* Left panel — source content */}
-        <div style={{
-          width: '60%', minWidth: 0, overflowY: 'auto',
-          borderRight: '1px solid var(--border)', padding: '24px',
-          // On mobile: full width, stacked
-        }}>
-          <SourcePanel data={data} />
+        <div
+          ref={leftPanelRef}
+          style={{ width: '60%', minWidth: 0, overflowY: 'auto', borderRight: '1px solid var(--border)', padding: '24px' }}
+        >
+          <SourcePanel
+            data={data}
+            summary={summary}
+            playerRef={playerRef}
+            audioRef={audioRef}
+          />
         </div>
 
         {/* Right panel — AI tools dock */}
         <div style={{ width: '40%', minWidth: 0, overflowY: 'auto', padding: '24px' }}>
-          <AiDock data={data} />
+          <AiDock
+            data={data}
+            summary={summary}
+            summaryStatus={summaryStatus}
+            onSummarize={triggerSummarize}
+            onRetry={triggerSummarize}
+            jumpToTimestamp={jumpToTimestamp}
+            jumpToParagraph={jumpToParagraph}
+          />
         </div>
       </div>
 
@@ -235,6 +334,14 @@ function ReaderLayout({ data }: { data: ContentData }) {
           .reader-left { width: 100% !important; border-right: none !important; border-bottom: 1px solid var(--border); }
           .reader-right { width: 100% !important; }
         }
+        @keyframes pulseHighlightAnim {
+          0%   { background: hsla(258,80%,65%,0.4); }
+          100% { background: transparent; }
+        }
+        .pulse-highlight { animation: pulseHighlightAnim 1.2s ease-out; }
+        .highlight-key-insight { background: hsla(258,80%,65%,0.2); border-bottom: 1px solid hsla(258,80%,65%,0.5); border-radius: 2px; cursor: pointer; }
+        .highlight-definition  { background: hsla(168,80%,45%,0.15); border-bottom: 1px solid hsla(168,80%,45%,0.4); border-radius: 2px; cursor: pointer; }
+        .highlight-conclusion  { background: hsla(45,90%,55%,0.15);  border-bottom: 1px solid hsla(45,90%,55%,0.4);  border-radius: 2px; cursor: pointer; }
       `}</style>
     </div>
   )
@@ -265,7 +372,17 @@ function ProcessingCompleteBadge() {
   )
 }
 
-function SourcePanel({ data }: { data: ContentData }) {
+function SourcePanel({
+  data,
+  summary,
+  playerRef,
+  audioRef,
+}: {
+  data: ContentData
+  summary: SummaryResponse | null
+  playerRef: React.RefObject<HTMLIFrameElement | null>
+  audioRef: React.RefObject<HTMLAudioElement | null>
+}) {
   return (
     <div>
       {/* Title + source info + status badge */}
@@ -289,56 +406,62 @@ function SourcePanel({ data }: { data: ContentData }) {
 
       {/* YouTube: embedded player + transcript */}
       {data.contentType === 'youtube' && data.sourceUrl && (
-        <YouTubePanel sourceUrl={data.sourceUrl} segments={data.segments ?? []} />
+        <YouTubePanel sourceUrl={data.sourceUrl} segments={data.segments ?? []} summary={summary} playerRef={playerRef} />
       )}
 
       {/* Audio: HTML5 player + transcript */}
       {data.contentType === 'audio' && (
-        <AudioPanel segments={data.segments ?? []} storagePath={null} />
+        <AudioPanel segments={data.segments ?? []} storagePath={null} summary={summary} audioRef={audioRef} />
       )}
 
       {/* Website / PDF / eBook: rendered text */}
       {(data.contentType === 'website' || data.contentType === 'pdf' || data.contentType === 'ebook') && (
-        <TextPanel text={data.extractedText ?? ''} chapters={data.chapters} />
+        <TextPanel text={data.extractedText ?? ''} chapters={data.chapters} summary={summary} />
       )}
-
-      {/* Hello-world confirmation: first 500 chars */}
-      <div style={{
-        marginTop: '24px', padding: '16px', borderRadius: '12px',
-        background: 'var(--surface-2)', border: '1px solid var(--border)',
-      }}>
-        <p style={{ fontSize: '11px', color: 'var(--muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-          Extracted text preview (first 500 chars)
-        </p>
-        <p style={{ fontSize: '13px', lineHeight: 1.65, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-          {(data.extractedText ?? '').slice(0, 500)}
-          {(data.extractedText ?? '').length > 500 && '…'}
-        </p>
-      </div>
     </div>
   )
 }
 
-function YouTubePanel({ sourceUrl, segments }: { sourceUrl: string; segments: TranscriptSegment[] }) {
+function YouTubePanel({
+  sourceUrl,
+  segments,
+  summary,
+  playerRef,
+}: {
+  sourceUrl: string
+  segments: TranscriptSegment[]
+  summary: SummaryResponse | null
+  playerRef: React.RefObject<HTMLIFrameElement | null>
+}) {
   const videoId = sourceUrl.match(/(?:[?&]v=|youtu\.be\/)([^&?]+)/)?.[1] ?? ''
   return (
     <div>
       {videoId && (
         <div style={{ position: 'relative', paddingBottom: '56.25%', height: 0, marginBottom: '20px', borderRadius: '12px', overflow: 'hidden' }}>
           <iframe
-            src={`https://www.youtube-nocookie.com/embed/${videoId}`}
+            ref={playerRef}
+            src={`https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1`}
             style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
             allowFullScreen
             title="YouTube video"
           />
         </div>
       )}
-      <TranscriptList segments={segments} />
+      <TranscriptList segments={segments} summary={summary} />
     </div>
   )
 }
 
-function AudioPanel({ segments }: { segments: TranscriptSegment[]; storagePath: string | null }) {
+function AudioPanel({
+  segments,
+  summary,
+  audioRef,
+}: {
+  segments: TranscriptSegment[]
+  storagePath: string | null
+  summary: SummaryResponse | null
+  audioRef: React.RefObject<HTMLAudioElement | null>
+}) {
   return (
     <div>
       <div style={{
@@ -347,33 +470,190 @@ function AudioPanel({ segments }: { segments: TranscriptSegment[]; storagePath: 
         display: 'flex', alignItems: 'center', gap: '12px',
       }}>
         <span style={{ color: 'var(--muted)', fontSize: '20px' }}>🎵</span>
-        <p style={{ fontSize: '13px', color: 'var(--muted)' }}>Audio player available after storage URL is configured.</p>
+        <audio ref={audioRef} controls style={{ flex: 1 }} />
       </div>
-      <TranscriptList segments={segments} />
+      <TranscriptList segments={segments} summary={summary} />
     </div>
   )
 }
 
-function TranscriptList({ segments }: { segments: TranscriptSegment[] }) {
+function TranscriptList({ segments, summary }: { segments: TranscriptSegment[]; summary: SummaryResponse | null }) {
+  const [tooltip, setTooltip] = useState<{ highlightId: string; x: number; y: number } | null>(null)
+
+  // Build a map from sequence → highlights for quick lookup
+  const highlightsBySeq = new Map<number, SummaryResponse['highlights']>()
+  if (summary) {
+    for (const h of summary.highlights) {
+      if (h.anchor.type === 'timestamp') {
+        const seq = h.anchor.sequence
+        if (!highlightsBySeq.has(seq)) highlightsBySeq.set(seq, [])
+        highlightsBySeq.get(seq)!.push(h)
+      }
+    }
+  }
+
+  function getHighlightClass(category: string) {
+    if (category === 'key_insight') return 'highlight-key-insight'
+    if (category === 'definition') return 'highlight-definition'
+    return 'highlight-conclusion'
+  }
+
+  const activeHighlight = tooltip
+    ? summary?.highlights.find((h) => h.id === tooltip.highlightId)
+    : null
+  const linkedPoint = activeHighlight && summary
+    ? summary.summaryPoints.find((sp) => {
+        if (sp.anchor.type !== 'timestamp' || activeHighlight.anchor.type !== 'timestamp') return false
+        return sp.anchor.sequence === activeHighlight.anchor.sequence
+      })
+    : null
+
   if (segments.length === 0) return <p style={{ fontSize: '13px', color: 'var(--muted)' }}>No transcript segments available.</p>
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', position: 'relative' }}>
       <h3 style={{ fontSize: '13px', fontWeight: 600, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>
         Transcript
       </h3>
-      {segments.map((s) => (
-        <div key={s.sequence} style={{ display: 'flex', gap: '10px', fontSize: '13px', lineHeight: 1.6 }}>
-          <span style={{ color: 'var(--accent)', flexShrink: 0, minWidth: '44px', fontSize: '11px', paddingTop: '2px' }}>
-            {formatTime(s.start)}
-          </span>
-          <span>{s.text}</span>
+      {tooltip && activeHighlight && (
+        <div
+          style={{
+            position: 'fixed', left: tooltip.x, top: tooltip.y - 8, transform: 'translateY(-100%)',
+            background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '10px',
+            padding: '10px 14px', maxWidth: '280px', zIndex: 50, fontSize: '12px', lineHeight: 1.5,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p style={{ fontWeight: 600, color: 'var(--accent)', marginBottom: '4px', textTransform: 'capitalize' }}>
+            {activeHighlight.category.replace('_', ' ')}
+          </p>
+          {linkedPoint && <p style={{ color: 'var(--text)' }}>{linkedPoint.text}</p>}
         </div>
-      ))}
+      )}
+      {segments.map((s) => {
+        const segHighlights = highlightsBySeq.get(s.sequence) ?? []
+        let content: React.ReactNode = s.text
+        if (segHighlights.length > 0) {
+          // Apply first matching highlight as a mark span (simple: wrap full segment text)
+          const h = segHighlights[0]
+          const idx = s.text.indexOf(h.text)
+          if (idx >= 0) {
+            content = (
+              <>
+                {s.text.slice(0, idx)}
+                <mark
+                  className={getHighlightClass(h.category)}
+                  data-highlight-id={h.id}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setTooltip({ highlightId: h.id, x: e.clientX, y: e.clientY })
+                  }}
+                >
+                  {h.text}
+                </mark>
+                {s.text.slice(idx + h.text.length)}
+              </>
+            )
+          }
+        }
+        return (
+          <div
+            key={s.sequence}
+            data-sequence={s.sequence}
+            style={{ display: 'flex', gap: '10px', fontSize: '13px', lineHeight: 1.6 }}
+          >
+            <span style={{ color: 'var(--accent)', flexShrink: 0, minWidth: '44px', fontSize: '11px', paddingTop: '2px' }}>
+              {formatTime(s.start)}
+            </span>
+            <span>{content}</span>
+          </div>
+        )
+      })}
+      {tooltip && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 49 }}
+          onClick={() => setTooltip(null)}
+          onKeyDown={(e) => e.key === 'Escape' && setTooltip(null)}
+        />
+      )}
     </div>
   )
 }
 
-function TextPanel({ text, chapters }: { text: string; chapters: EbookChapter[] | null }) {
+function TextPanel({
+  text,
+  chapters,
+  summary,
+}: {
+  text: string
+  chapters: EbookChapter[] | null
+  summary: SummaryResponse | null
+}) {
+  const [tooltip, setTooltip] = useState<{ highlightId: string; x: number; y: number } | null>(null)
+
+  const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 0)
+
+  // Build map from paragraph_index → highlights
+  const highlightsByPara = new Map<number, SummaryResponse['highlights']>()
+  if (summary) {
+    for (const h of summary.highlights) {
+      if (h.anchor.type === 'paragraph') {
+        const idx = h.anchor.paragraph_index
+        if (!highlightsByPara.has(idx)) highlightsByPara.set(idx, [])
+        highlightsByPara.get(idx)!.push(h)
+      }
+    }
+  }
+
+  function getHighlightClass(category: string) {
+    if (category === 'key_insight') return 'highlight-key-insight'
+    if (category === 'definition') return 'highlight-definition'
+    return 'highlight-conclusion'
+  }
+
+  const activeHighlight = tooltip
+    ? summary?.highlights.find((h) => h.id === tooltip.highlightId)
+    : null
+  const linkedPoint = activeHighlight && summary
+    ? summary.summaryPoints.find((sp) => {
+        if (sp.anchor.type !== 'paragraph' || activeHighlight.anchor.type !== 'paragraph') return false
+        return sp.anchor.paragraph_index === activeHighlight.anchor.paragraph_index
+      })
+    : null
+
+  function renderParagraph(paraText: string, paraIndex: number): React.ReactNode {
+    const paraHighlights = highlightsByPara.get(paraIndex) ?? []
+    if (paraHighlights.length === 0) return paraText
+
+    // Build segments with marks
+    let remaining = paraText
+    const parts: React.ReactNode[] = []
+    let offset = 0
+
+    for (const h of paraHighlights) {
+      const idx = remaining.indexOf(h.text)
+      if (idx < 0) continue
+      if (idx > 0) parts.push(<span key={offset}>{remaining.slice(0, idx)}</span>)
+      parts.push(
+        <mark
+          key={h.id}
+          className={getHighlightClass(h.category)}
+          data-highlight-id={h.id}
+          onClick={(e) => {
+            e.stopPropagation()
+            setTooltip({ highlightId: h.id, x: e.clientX, y: e.clientY })
+          }}
+        >
+          {h.text}
+        </mark>
+      )
+      remaining = remaining.slice(idx + h.text.length)
+      offset++
+    }
+    if (remaining) parts.push(<span key="tail">{remaining}</span>)
+    return parts
+  }
+
   if (chapters && chapters.length > 0) {
     return (
       <div>
@@ -386,10 +666,62 @@ function TextPanel({ text, chapters }: { text: string; chapters: EbookChapter[] 
       </div>
     )
   }
-  return <p style={{ fontSize: '14px', lineHeight: 1.75, whiteSpace: 'pre-wrap', color: 'var(--text)' }}>{text}</p>
+
+  return (
+    <div style={{ position: 'relative' }}>
+      {tooltip && activeHighlight && (
+        <div
+          style={{
+            position: 'fixed', left: tooltip.x, top: tooltip.y - 8, transform: 'translateY(-100%)',
+            background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '10px',
+            padding: '10px 14px', maxWidth: '280px', zIndex: 50, fontSize: '12px', lineHeight: 1.5,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p style={{ fontWeight: 600, color: 'var(--accent)', marginBottom: '4px', textTransform: 'capitalize' }}>
+            {activeHighlight.category.replace('_', ' ')}
+          </p>
+          {linkedPoint && <p style={{ color: 'var(--text)' }}>{linkedPoint.text}</p>}
+        </div>
+      )}
+      {paragraphs.map((para, i) => (
+        <p
+          key={i}
+          data-paragraph-index={i}
+          style={{ fontSize: '14px', lineHeight: 1.75, color: 'var(--text)', marginBottom: '16px' }}
+        >
+          {renderParagraph(para, i)}
+        </p>
+      ))}
+      {tooltip && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 49 }}
+          onClick={() => setTooltip(null)}
+          onKeyDown={(e) => e.key === 'Escape' && setTooltip(null)}
+        />
+      )}
+    </div>
+  )
 }
 
-function AiDock({ data }: { data: ContentData }) {
+function AiDock({
+  data,
+  summary,
+  summaryStatus,
+  onSummarize,
+  onRetry,
+  jumpToTimestamp,
+  jumpToParagraph,
+}: {
+  data: ContentData
+  summary: SummaryResponse | null
+  summaryStatus: 'idle' | 'loading' | 'error'
+  onSummarize: () => void
+  onRetry: () => void
+  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToParagraph: (paragraphIndex: number) => void
+}) {
   const [activeTab, setActiveTab] = useState<'summary' | 'qa' | 'read-aloud'>('summary')
   const tabs = [
     { id: 'summary' as const, label: 'Summary' },
@@ -421,32 +753,206 @@ function AiDock({ data }: { data: ContentData }) {
         ))}
       </div>
 
-      {/* Placeholder content */}
-      <div style={{
-        border: '1px dashed var(--border)', borderRadius: '12px', padding: '32px',
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        gap: '10px', textAlign: 'center',
-      }}>
-        <span style={{ fontSize: '24px' }}>
-          {activeTab === 'summary' ? '📝' : activeTab === 'qa' ? '💬' : '🔊'}
-        </span>
-        <p style={{ fontSize: '14px', fontWeight: 500 }}>
-          {activeTab === 'summary' ? 'AI Summary' : activeTab === 'qa' ? 'Ask a Question' : 'Read Aloud'}
-        </p>
-        <p style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5 }}>
-          {activeTab === 'summary'
-            ? 'AI-powered summarization coming in REQ-2.'
-            : activeTab === 'qa'
-            ? 'Source-anchored Q&A coming in REQ-3.'
-            : 'Text-to-speech narration coming in REQ-4.'}
-        </p>
+      {activeTab === 'summary' && (
+        <SummaryTab
+          summary={summary}
+          summaryStatus={summaryStatus}
+          onSummarize={onSummarize}
+          onRetry={onRetry}
+          jumpToTimestamp={jumpToTimestamp}
+          jumpToParagraph={jumpToParagraph}
+        />
+      )}
+
+      {activeTab !== 'summary' && (
         <div style={{
-          marginTop: '8px', padding: '8px 14px', borderRadius: '9px',
-          background: 'var(--surface-2)', fontSize: '11px', color: 'var(--muted)',
+          border: '1px dashed var(--border)', borderRadius: '12px', padding: '32px',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: '10px', textAlign: 'center',
         }}>
-          Content: {data.contentType} · {(data.extractedText ?? '').length.toLocaleString()} chars extracted
+          <span style={{ fontSize: '24px' }}>{activeTab === 'qa' ? '💬' : '🔊'}</span>
+          <p style={{ fontSize: '14px', fontWeight: 500 }}>
+            {activeTab === 'qa' ? 'Ask a Question' : 'Read Aloud'}
+          </p>
+          <p style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5 }}>
+            {activeTab === 'qa' ? 'Source-anchored Q&A coming in REQ-3.' : 'Text-to-speech narration coming in REQ-4.'}
+          </p>
+          <div style={{ marginTop: '8px', padding: '8px 14px', borderRadius: '9px', background: 'var(--surface-2)', fontSize: '11px', color: 'var(--muted)' }}>
+            Content: {data.contentType} · {(data.extractedText ?? '').length.toLocaleString()} chars extracted
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SummaryTab({
+  summary,
+  summaryStatus,
+  onSummarize,
+  onRetry,
+  jumpToTimestamp,
+  jumpToParagraph,
+}: {
+  summary: SummaryResponse | null
+  summaryStatus: 'idle' | 'loading' | 'error'
+  onSummarize: () => void
+  onRetry: () => void
+  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToParagraph: (paragraphIndex: number) => void
+}) {
+  // Loading skeleton
+  if (summaryStatus === 'loading') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {[1, 2, 3, 4].map((i) => (
+          <SkeletonCard key={i} width={i % 2 === 0 ? '85%' : '100%'} />
+        ))}
+      </div>
+    )
+  }
+
+  // Error state
+  if (summaryStatus === 'error') {
+    return (
+      <div style={{
+        border: '1px solid var(--border)', borderRadius: '12px', padding: '24px',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', textAlign: 'center',
+      }}>
+        <span style={{ fontSize: '24px' }}>⚠️</span>
+        <p style={{ fontSize: '13px', color: 'var(--muted)' }}>Summarization failed. Tap Retry to try again.</p>
+        <button
+          onClick={onRetry}
+          style={{
+            padding: '8px 20px', borderRadius: '8px', border: '1px solid var(--accent)',
+            background: 'transparent', color: 'var(--accent)', fontSize: '13px', fontWeight: 500, cursor: 'pointer',
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    )
+  }
+
+  // Empty state — no summary yet
+  if (!summary || summary.summaryPoints.length === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '32px 16px', textAlign: 'center' }}>
+        <div style={{
+          width: '56px', height: '56px', borderRadius: '16px',
+          background: 'hsla(258,80%,55%,0.1)', border: '1px solid hsla(258,80%,55%,0.2)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px',
+        }}>
+          ✨
+        </div>
+        <div>
+          <p style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px' }}>Ready to summarize</p>
+          <p style={{ fontSize: '13px', color: 'var(--muted)', lineHeight: 1.6, maxWidth: '240px' }}>
+            Generate an AI summary grounded entirely in this content — every point links back to the exact source.
+          </p>
+        </div>
+        <button
+          onClick={onSummarize}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: '6px',
+            padding: '10px 24px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+            background: 'linear-gradient(135deg, hsl(258,75%,55%), hsl(258,70%,45%))',
+            color: 'white', fontSize: '13px', fontWeight: 600,
+            boxShadow: '0 4px 16px hsla(258,75%,55%,0.4)',
+          }}
+        >
+          ✨ Summarize
+        </button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', justifyContent: 'center' }}>
+          {['Source-anchored', 'Jump to source', 'Smart highlights'].map((pill) => (
+            <span key={pill} style={{
+              fontSize: '11px', padding: '3px 10px', borderRadius: '999px',
+              background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--muted)',
+            }}>
+              {pill}
+            </span>
+          ))}
         </div>
       </div>
+    )
+  }
+
+  // Populated summary list
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      {summary.summaryPoints.map((point) => {
+        const anchor = point.anchor
+        const label = anchor.type === 'timestamp'
+          ? formatTime(anchor.start_seconds)
+          : `¶ ${anchor.paragraph_index + 1}`
+
+        function handleJump() {
+          if (anchor.type === 'timestamp') {
+            jumpToTimestamp(anchor.start_seconds, anchor.sequence)
+          } else {
+            jumpToParagraph(anchor.paragraph_index)
+          }
+        }
+
+        return (
+          <div
+            key={point.id}
+            style={{
+              padding: '12px 14px', borderRadius: '10px',
+              background: 'var(--surface-2)', border: '1px solid var(--border)',
+              display: 'flex', flexDirection: 'column', gap: '8px',
+            }}
+          >
+            <p style={{ fontSize: '13px', lineHeight: 1.6, color: 'var(--text)', margin: 0 }}>{point.text}</p>
+            <button
+              onClick={handleJump}
+              style={{
+                alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: '5px',
+                padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--border)',
+                background: 'var(--surface)', color: 'var(--accent)', fontSize: '11px',
+                fontWeight: 500, cursor: 'pointer',
+              }}
+            >
+              ↗ {label}
+            </button>
+          </div>
+        )
+      })}
+
+      <button
+        onClick={onSummarize}
+        style={{
+          marginTop: '4px', padding: '8px', borderRadius: '8px', border: '1px solid var(--border)',
+          background: 'transparent', color: 'var(--muted)', fontSize: '12px', cursor: 'pointer',
+          alignSelf: 'center',
+        }}
+      >
+        Regenerate
+      </button>
+    </div>
+  )
+}
+
+function SkeletonCard({ width }: { width: string }) {
+  return (
+    <div style={{
+      padding: '12px 14px', borderRadius: '10px',
+      background: 'var(--surface-2)', border: '1px solid var(--border)',
+      display: 'flex', flexDirection: 'column', gap: '8px',
+    }}>
+      <div style={{
+        height: '13px', borderRadius: '6px', width,
+        background: 'linear-gradient(90deg, var(--border) 25%, var(--surface) 50%, var(--border) 75%)',
+        backgroundSize: '200% 100%',
+        animation: 'shimmer 1.4s ease-in-out infinite',
+      }} />
+      <div style={{
+        height: '13px', borderRadius: '6px', width: '70%',
+        background: 'linear-gradient(90deg, var(--border) 25%, var(--surface) 50%, var(--border) 75%)',
+        backgroundSize: '200% 100%',
+        animation: 'shimmer 1.4s ease-in-out infinite 0.2s',
+      }} />
+      <style>{`@keyframes shimmer { 0% { background-position: -200% 0 } 100% { background-position: 200% 0 } }`}</style>
     </div>
   )
 }
