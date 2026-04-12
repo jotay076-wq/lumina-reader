@@ -1,6 +1,45 @@
 export type ContentType = 'youtube' | 'website' | 'pdf' | 'audio' | 'ebook'
 export type ContentStatus = 'processing' | 'complete' | 'error'
 
+// ── Summarization types ────────────────────────────────────────────────────
+
+export interface TimestampAnchor {
+  type: 'timestamp'
+  start_seconds: number
+  sequence: number
+}
+
+export interface ParagraphAnchor {
+  type: 'paragraph'
+  paragraph_index: number
+}
+
+export type SourceAnchor = TimestampAnchor | ParagraphAnchor
+
+export interface SummaryPoint {
+  id: string
+  text: string
+  anchor: SourceAnchor
+}
+
+export interface Highlight {
+  id: string
+  category: 'key_insight' | 'definition' | 'conclusion'
+  text: string
+  anchor: SourceAnchor
+}
+
+export type SummaryStatus = 'processing' | 'complete' | 'error'
+
+export interface SummaryResponse {
+  summaryId: string
+  contentId: string
+  status: SummaryStatus
+  summaryPoints: SummaryPoint[]
+  highlights: Highlight[]
+  createdAt: string
+}
+
 export interface TranscriptSegment {
   start: number // seconds
   text: string
