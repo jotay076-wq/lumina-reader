@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import type { ContentType, ContentStatus, TranscriptSegment, EbookChapter, SummaryResponse } from '@/lib/types'
+import { useReadAloud, TONE_LABELS, SPEED_OPTIONS } from '@/lib/use-read-aloud'
+import type { ReadAloudControls, ToneMode } from '@/lib/use-read-aloud'
 
 interface ContentData {
   contentId: string
@@ -191,6 +193,7 @@ function ReaderLayout({ data }: { data: ContentData }) {
   const leftPanelRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<HTMLIFrameElement | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const readAloud = useReadAloud({ contentId: data.contentId, contentStatus: data.status })
 
   // Fetch existing summary on mount
   useEffect(() => {
@@ -302,16 +305,20 @@ function ReaderLayout({ data }: { data: ContentData }) {
       {/* Split panel */}
       <div style={{ flex: 1, display: 'flex', gap: 0, flexDirection: 'row' }}>
         {/* Left panel — source content */}
-        <div
-          ref={leftPanelRef}
-          style={{ width: '60%', minWidth: 0, overflowY: 'auto', borderRight: '1px solid var(--border)', padding: '24px' }}
-        >
-          <SourcePanel
-            data={data}
-            summary={summary}
-            playerRef={playerRef}
-            audioRef={audioRef}
-          />
+        <div style={{ width: '60%', minWidth: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)' }}>
+          <div
+            ref={leftPanelRef}
+            style={{ flex: 1, overflowY: 'auto', padding: '24px' }}
+          >
+            <SourcePanel
+              data={data}
+              summary={summary}
+              playerRef={playerRef}
+              audioRef={audioRef}
+              readAloud={readAloud}
+            />
+          </div>
+          <ReadAloudBar readAloud={readAloud} contentStatus={data.status} />
         </div>
 
         {/* Right panel — AI tools dock */}
@@ -342,6 +349,14 @@ function ReaderLayout({ data }: { data: ContentData }) {
         .highlight-key-insight { background: hsla(258,80%,65%,0.2); border-bottom: 1px solid hsla(258,80%,65%,0.5); border-radius: 2px; cursor: pointer; }
         .highlight-definition  { background: hsla(168,80%,45%,0.15); border-bottom: 1px solid hsla(168,80%,45%,0.4); border-radius: 2px; cursor: pointer; }
         .highlight-conclusion  { background: hsla(45,90%,55%,0.15);  border-bottom: 1px solid hsla(45,90%,55%,0.4);  border-radius: 2px; cursor: pointer; }
+        .seg-row { position: relative; }
+        .seg-row .play-from-btn { opacity: 0; transition: opacity 0.15s; }
+        .seg-row:hover .play-from-btn { opacity: 1; }
+        .para-row { position: relative; }
+        .para-row .play-from-btn { opacity: 0; transition: opacity 0.15s; }
+        .para-row:hover .play-from-btn { opacity: 1; }
+        .play-from-btn { position: absolute; right: 0; top: 50%; transform: translateY(-50%); }
+        .word-active { background: hsla(258,80%,65%,0.4); border-radius: 3px; font-weight: 600; }
       `}</style>
     </div>
   )
@@ -377,11 +392,13 @@ function SourcePanel({
   summary,
   playerRef,
   audioRef,
+  readAloud,
 }: {
   data: ContentData
   summary: SummaryResponse | null
   playerRef: React.RefObject<HTMLIFrameElement | null>
   audioRef: React.RefObject<HTMLAudioElement | null>
+  readAloud: ReadAloudControls
 }) {
   return (
     <div>
@@ -406,17 +423,17 @@ function SourcePanel({
 
       {/* YouTube: embedded player + transcript */}
       {data.contentType === 'youtube' && data.sourceUrl && (
-        <YouTubePanel sourceUrl={data.sourceUrl} segments={data.segments ?? []} summary={summary} playerRef={playerRef} />
+        <YouTubePanel sourceUrl={data.sourceUrl} segments={data.segments ?? []} summary={summary} playerRef={playerRef} readAloud={readAloud} />
       )}
 
       {/* Audio: HTML5 player + transcript */}
       {data.contentType === 'audio' && (
-        <AudioPanel segments={data.segments ?? []} storagePath={null} summary={summary} audioRef={audioRef} />
+        <AudioPanel segments={data.segments ?? []} storagePath={null} summary={summary} audioRef={audioRef} readAloud={readAloud} />
       )}
 
       {/* Website / PDF / eBook: rendered text */}
       {(data.contentType === 'website' || data.contentType === 'pdf' || data.contentType === 'ebook') && (
-        <TextPanel text={data.extractedText ?? ''} chapters={data.chapters} summary={summary} />
+        <TextPanel text={data.extractedText ?? ''} chapters={data.chapters} summary={summary} readAloud={readAloud} />
       )}
     </div>
   )
@@ -427,11 +444,13 @@ function YouTubePanel({
   segments,
   summary,
   playerRef,
+  readAloud,
 }: {
   sourceUrl: string
   segments: TranscriptSegment[]
   summary: SummaryResponse | null
   playerRef: React.RefObject<HTMLIFrameElement | null>
+  readAloud: ReadAloudControls
 }) {
   const videoId = sourceUrl.match(/(?:[?&]v=|youtu\.be\/)([^&?]+)/)?.[1] ?? ''
   return (
@@ -447,7 +466,7 @@ function YouTubePanel({
           />
         </div>
       )}
-      <TranscriptList segments={segments} summary={summary} />
+      <TranscriptList segments={segments} summary={summary} readAloud={readAloud} />
     </div>
   )
 }
@@ -456,11 +475,13 @@ function AudioPanel({
   segments,
   summary,
   audioRef,
+  readAloud,
 }: {
   segments: TranscriptSegment[]
   storagePath: string | null
   summary: SummaryResponse | null
   audioRef: React.RefObject<HTMLAudioElement | null>
+  readAloud: ReadAloudControls
 }) {
   return (
     <div>
@@ -472,13 +493,14 @@ function AudioPanel({
         <span style={{ color: 'var(--muted)', fontSize: '20px' }}>🎵</span>
         <audio ref={audioRef} controls style={{ flex: 1 }} />
       </div>
-      <TranscriptList segments={segments} summary={summary} />
+      <TranscriptList segments={segments} summary={summary} readAloud={readAloud} />
     </div>
   )
 }
 
-function TranscriptList({ segments, summary }: { segments: TranscriptSegment[]; summary: SummaryResponse | null }) {
+function TranscriptList({ segments, summary, readAloud }: { segments: TranscriptSegment[]; summary: SummaryResponse | null; readAloud: ReadAloudControls }) {
   const [tooltip, setTooltip] = useState<{ highlightId: string; x: number; y: number } | null>(null)
+  const isKaraoke = (readAloud.status === 'playing' || readAloud.status === 'paused') && readAloud.wordSpans.length > 0
 
   // Build a map from sequence → highlights for quick lookup
   const highlightsBySeq = new Map<number, SummaryResponse['highlights']>()
@@ -509,6 +531,18 @@ function TranscriptList({ segments, summary }: { segments: TranscriptSegment[]; 
     : null
 
   if (segments.length === 0) return <p style={{ fontSize: '13px', color: 'var(--muted)' }}>No transcript segments available.</p>
+
+  if (isKaraoke) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <h3 style={{ fontSize: '13px', fontWeight: 600, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>
+          Transcript
+        </h3>
+        <KaraokeView wordSpans={readAloud.wordSpans} currentWordIndex={readAloud.currentWordIndex} />
+      </div>
+    )
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', position: 'relative' }}>
       <h3 style={{ fontSize: '13px', fontWeight: 600, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>
@@ -559,13 +593,30 @@ function TranscriptList({ segments, summary }: { segments: TranscriptSegment[]; 
         return (
           <div
             key={s.sequence}
+            className="seg-row"
             data-sequence={s.sequence}
-            style={{ display: 'flex', gap: '10px', fontSize: '13px', lineHeight: 1.6 }}
+            style={{ display: 'flex', gap: '10px', fontSize: '13px', lineHeight: 1.6, paddingRight: '28px' }}
           >
             <span style={{ color: 'var(--accent)', flexShrink: 0, minWidth: '44px', fontSize: '11px', paddingTop: '2px' }}>
               {formatTime(s.start)}
             </span>
             <span>{content}</span>
+            <button
+              className="play-from-btn"
+              onClick={() => readAloud.playFromAnchor(
+                { type: 'timestamp', start_seconds: s.start, sequence: s.sequence },
+                segments,
+                null
+              )}
+              title="Play from here"
+              style={{
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                borderRadius: '5px', color: 'var(--accent)', fontSize: '10px',
+                padding: '2px 6px', cursor: 'pointer', whiteSpace: 'nowrap',
+              }}
+            >
+              ▶
+            </button>
           </div>
         )
       })}
@@ -584,12 +635,15 @@ function TextPanel({
   text,
   chapters,
   summary,
+  readAloud,
 }: {
   text: string
   chapters: EbookChapter[] | null
   summary: SummaryResponse | null
+  readAloud: ReadAloudControls
 }) {
   const [tooltip, setTooltip] = useState<{ highlightId: string; x: number; y: number } | null>(null)
+  const isKaraoke = (readAloud.status === 'playing' || readAloud.status === 'paused') && readAloud.wordSpans.length > 0
 
   const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 0)
 
@@ -654,6 +708,10 @@ function TextPanel({
     return parts
   }
 
+  if (isKaraoke) {
+    return <KaraokeView wordSpans={readAloud.wordSpans} currentWordIndex={readAloud.currentWordIndex} />
+  }
+
   if (chapters && chapters.length > 0) {
     return (
       <div>
@@ -686,13 +744,32 @@ function TextPanel({
         </div>
       )}
       {paragraphs.map((para, i) => (
-        <p
+        <div
           key={i}
+          className="para-row"
           data-paragraph-index={i}
-          style={{ fontSize: '14px', lineHeight: 1.75, color: 'var(--text)', marginBottom: '16px' }}
+          style={{ marginBottom: '16px', paddingRight: '28px' }}
         >
-          {renderParagraph(para, i)}
-        </p>
+          <p style={{ fontSize: '14px', lineHeight: 1.75, color: 'var(--text)', margin: 0 }}>
+            {renderParagraph(para, i)}
+          </p>
+          <button
+            className="play-from-btn"
+            onClick={() => readAloud.playFromAnchor(
+              { type: 'paragraph', paragraph_index: i },
+              undefined,
+              text
+            )}
+            title="Play from here"
+            style={{
+              background: 'var(--surface-2)', border: '1px solid var(--border)',
+              borderRadius: '5px', color: 'var(--accent)', fontSize: '10px',
+              padding: '2px 6px', cursor: 'pointer',
+            }}
+          >
+            ▶
+          </button>
+        </div>
       ))}
       {tooltip && (
         <div
@@ -722,11 +799,10 @@ function AiDock({
   jumpToTimestamp: (startSeconds: number, sequence: number) => void
   jumpToParagraph: (paragraphIndex: number) => void
 }) {
-  const [activeTab, setActiveTab] = useState<'summary' | 'qa' | 'read-aloud'>('summary')
+  const [activeTab, setActiveTab] = useState<'summary' | 'qa'>('summary')
   const tabs = [
     { id: 'summary' as const, label: 'Summary' },
     { id: 'qa' as const, label: 'Q&A' },
-    { id: 'read-aloud' as const, label: 'Read Aloud' },
   ]
 
   return (
@@ -772,19 +848,6 @@ function AiDock({
         />
       )}
 
-      {activeTab === 'read-aloud' && (
-        <div style={{
-          border: '1px dashed var(--border)', borderRadius: '12px', padding: '32px',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          gap: '10px', textAlign: 'center',
-        }}>
-          <span style={{ fontSize: '24px' }}>🔊</span>
-          <p style={{ fontSize: '14px', fontWeight: 500 }}>Read Aloud</p>
-          <p style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5 }}>
-            Text-to-speech narration coming in REQ-4.
-          </p>
-        </div>
-      )}
     </div>
   )
 }
@@ -964,6 +1027,161 @@ function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+// ─── Read Aloud ───────────────────────────────────────────────────────────────
+
+function KaraokeView({ wordSpans, currentWordIndex }: { wordSpans: string[]; currentWordIndex: number }) {
+  return (
+    <div style={{ fontSize: '14px', lineHeight: 2, color: 'var(--text)' }}>
+      {wordSpans.map((word, i) => (
+        <span
+          key={i}
+          data-word-index={i}
+          className={i === currentWordIndex ? 'word-active' : undefined}
+          style={{ display: 'inline', padding: '1px 2px', transition: 'background 0.1s' }}
+        >
+          {word}{' '}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function ReadAloudBar({ readAloud, contentStatus }: { readAloud: ReadAloudControls; contentStatus: string }) {
+  const { status, tone, rate, wordSpans, currentWordIndex, speechSupported } = readAloud
+  const notSupported = !speechSupported
+  const notReady = contentStatus !== 'complete'
+  const disabled = notSupported || notReady || status === 'rewriting'
+
+  return (
+    <div style={{
+      borderTop: '1px solid var(--border)', background: 'var(--surface)',
+      padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: '8px', flexShrink: 0,
+    }}>
+      {/* Status messages */}
+      {notSupported && (
+        <p style={{ fontSize: '11px', color: 'var(--muted)', textAlign: 'center', margin: 0 }}>
+          Text-to-speech is not supported in this browser.
+        </p>
+      )}
+      {!notSupported && notReady && (
+        <p style={{ fontSize: '11px', color: 'var(--muted)', textAlign: 'center', margin: 0 }}>
+          Content still processing — playback unavailable.
+        </p>
+      )}
+
+      {/* Controls row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+        {/* Tone selector pills */}
+        <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap', flex: 1 }}>
+          {(Object.entries(TONE_LABELS) as [ToneMode, string][]).map(([t, label]) => (
+            <button
+              key={t}
+              onClick={() => readAloud.setTone(t)}
+              disabled={notSupported || notReady}
+              style={{
+                padding: '3px 7px', borderRadius: '6px', fontSize: '10px', fontWeight: 500,
+                border: tone === t ? '1px solid var(--accent)' : '1px solid var(--border)',
+                background: tone === t ? 'var(--accent-dim)' : 'transparent',
+                color: tone === t ? 'var(--accent)' : 'var(--muted)',
+                cursor: (notSupported || notReady) ? 'not-allowed' : 'pointer',
+                opacity: (notSupported || notReady) ? 0.5 : 1,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Speed selector */}
+        <select
+          value={rate}
+          onChange={(e) => readAloud.setRate(Number(e.target.value))}
+          disabled={notSupported || notReady}
+          style={{
+            padding: '3px 6px', borderRadius: '6px', fontSize: '11px',
+            border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)',
+            cursor: (notSupported || notReady) ? 'not-allowed' : 'pointer',
+            opacity: (notSupported || notReady) ? 0.5 : 1,
+          }}
+        >
+          {SPEED_OPTIONS.map((s) => (
+            <option key={s} value={s}>{s}×</option>
+          ))}
+        </select>
+
+        {/* Rewriting indicator */}
+        {status === 'rewriting' && (
+          <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Rewriting…</span>
+        )}
+
+        {/* Error retry */}
+        {status === 'error' && (
+          <button
+            onClick={() => readAloud.play(currentWordIndex)}
+            style={{
+              padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--red, #ef4444)',
+              background: 'transparent', color: 'var(--red, #ef4444)', fontSize: '11px', cursor: 'pointer',
+            }}
+          >
+            Retry
+          </button>
+        )}
+
+        {/* Stop button */}
+        {(status === 'playing' || status === 'paused') && (
+          <button
+            onClick={readAloud.stop}
+            style={{
+              width: '28px', height: '28px', borderRadius: '6px', border: '1px solid var(--border)',
+              background: 'var(--surface-2)', color: 'var(--muted)', fontSize: '11px',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            }}
+          >
+            ■
+          </button>
+        )}
+
+        {/* Play / Pause button */}
+        <button
+          onClick={() => {
+            if (status === 'playing') readAloud.pause()
+            else if (status === 'paused') readAloud.resume()
+            else readAloud.play()
+          }}
+          disabled={disabled}
+          style={{
+            width: '32px', height: '32px', borderRadius: '8px', border: 'none', flexShrink: 0,
+            background: disabled
+              ? 'var(--border)'
+              : 'linear-gradient(135deg, hsl(258,75%,55%), hsl(258,70%,45%))',
+            color: 'white', fontSize: '13px',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          aria-label={status === 'playing' ? 'Pause' : 'Play'}
+        >
+          {status === 'playing' ? '⏸' : '▶'}
+        </button>
+      </div>
+
+      {/* Word progress bar */}
+      {(status === 'playing' || status === 'paused') && wordSpans.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{ flex: 1, height: '2px', background: 'var(--border)', borderRadius: '1px', overflow: 'hidden' }}>
+            <div style={{
+              height: '100%', background: 'var(--accent)', borderRadius: '1px', transition: 'width 0.2s',
+              width: `${Math.round((currentWordIndex / wordSpans.length) * 100)}%`,
+            }} />
+          </div>
+          <span style={{ fontSize: '10px', color: 'var(--muted)', flexShrink: 0 }}>
+            {currentWordIndex}/{wordSpans.length}
+          </span>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ─── Q&A Tab ──────────────────────────────────────────────────────────────────
