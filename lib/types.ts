@@ -85,3 +85,15 @@ export interface ContentListItem {
   sourceUrl: string | null
   createdAt: string
 }
+
+// ── Tutor types ────────────────────────────────────────────────────────────
+
+export type TutorStyle = 'analogy' | 'step-by-step' | 'plain-english'
+
+export interface TutorCard {
+  cardId: string
+  style: TutorStyle
+  reexplanation: string
+  anchors: SourceAnchor[]
+  createdAt: string
+}
