@@ -2,9 +2,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
-import type { ContentType, ContentStatus, TranscriptSegment, EbookChapter, SummaryResponse } from '@/lib/types'
+import type { ContentType, ContentStatus, TranscriptSegment, EbookChapter, SummaryResponse, TutorCard, TutorStyle, SourceAnchor } from '@/lib/types'
 import { useReadAloud, TONE_LABELS, SPEED_OPTIONS } from '@/lib/use-read-aloud'
 import type { ReadAloudControls, ToneMode } from '@/lib/use-read-aloud'
+import { useConfusionDetector } from '@/lib/use-confusion-detector'
+import type { ConfusionEvent } from '@/lib/use-confusion-detector'
+import TutorTab from '@/components/TutorTab'
 
 interface ContentData {
   contentId: string
@@ -195,6 +198,123 @@ function ReaderLayout({ data }: { data: ContentData }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const readAloud = useReadAloud({ contentId: data.contentId, contentStatus: data.status })
 
+  // Tutor state
+  const [tutorCards, setTutorCards] = useState<TutorCard[]>([])
+  const [activeConfusion, setActiveConfusion] = useState<ConfusionEvent | null>(null)
+  const [explainStatus, setExplainStatus] = useState<'idle' | 'loading' | 'error'>('idle')
+  const confusionQueueRef = useRef<ConfusionEvent[]>([])
+  const sessionExplainCacheRef = useRef<Map<string, TutorCard>>(new Map())
+
+  const confusionDetector = useConfusionDetector(
+    data.status === 'complete',
+    useCallback((event: ConfusionEvent) => {
+      setActiveConfusion((prev) => {
+        if (prev === null) return event
+        confusionQueueRef.current.push(event)
+        return prev
+      })
+    }, [])
+  )
+
+  // Restore tutor cards on mount
+  useEffect(() => {
+    fetch(`/api/tutor/${data.contentId}`)
+      .then((r) => r.ok ? r.json() : { cards: [] })
+      .then((d: { cards: TutorCard[] }) => setTutorCards(d.cards ?? []))
+      .catch(() => {})
+  }, [data.contentId])
+
+  // IntersectionObserver for confusion detection
+  useEffect(() => {
+    if (data.status !== 'complete' || !leftPanelRef.current) return
+
+    const observers: IntersectionObserver[] = []
+
+    // Observe transcript segments
+    const segRows = leftPanelRef.current.querySelectorAll<HTMLElement>('.seg-row[data-sequence]')
+    segRows.forEach((el) => {
+      const sequence = parseInt(el.dataset.sequence ?? '0', 10)
+      const text = el.querySelector('span:last-of-type')?.textContent ?? ''
+      const obs = new IntersectionObserver(
+        ([entry]) => { if (entry.isIntersecting) confusionDetector.onSegmentVisible(sequence, text) },
+        { threshold: 0.5 }
+      )
+      obs.observe(el)
+      observers.push(obs)
+    })
+
+    // Observe paragraphs
+    const paraRows = leftPanelRef.current.querySelectorAll<HTMLElement>('.para-row[data-paragraph-index]')
+    paraRows.forEach((el) => {
+      const idx = parseInt(el.dataset.paragraphIndex ?? '0', 10)
+      const text = el.querySelector('p')?.textContent ?? ''
+      const obs = new IntersectionObserver(
+        ([entry]) => { if (entry.isIntersecting) confusionDetector.onParagraphVisible(idx, text) },
+        { threshold: 0.5 }
+      )
+      obs.observe(el)
+      observers.push(obs)
+    })
+
+    // Attach scroll handler for direction tracking
+    const scrollEl = leftPanelRef.current
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler = (window as any).__confusionScrollHandler
+    if (handler) scrollEl.addEventListener('scroll', handler)
+
+    return () => {
+      observers.forEach((obs) => obs.disconnect())
+      if (handler) scrollEl.removeEventListener('scroll', handler)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.status, data.segments, data.extractedText])
+
+  async function handleStyleSelect(style: TutorStyle) {
+    if (!activeConfusion) return
+    const cacheKey = `${data.contentId}:${activeConfusion.anchorType}:${activeConfusion.anchorRef}:${style}`
+    const cached = sessionExplainCacheRef.current.get(cacheKey)
+    if (cached) {
+      setTutorCards((prev) => [cached, ...prev.filter((c) => c.cardId !== cached.cardId)])
+      confusionDetector.resetPassage(activeConfusion.anchorType, activeConfusion.anchorRef)
+      setActiveConfusion(confusionQueueRef.current.shift() ?? null)
+      return
+    }
+    setExplainStatus('loading')
+    try {
+      const res = await fetch('/api/tutor/explain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contentId: data.contentId,
+          anchorType: activeConfusion.anchorType,
+          anchorRef: activeConfusion.anchorRef,
+          style,
+        }),
+      })
+      if (!res.ok) { setExplainStatus('error'); return }
+      const card: TutorCard = await res.json()
+      sessionExplainCacheRef.current.set(cacheKey, card)
+      setTutorCards((prev) => [card, ...prev])
+      setExplainStatus('idle')
+      confusionDetector.resetPassage(activeConfusion.anchorType, activeConfusion.anchorRef)
+      setActiveConfusion(confusionQueueRef.current.shift() ?? null)
+    } catch {
+      setExplainStatus('error')
+    }
+  }
+
+  function handleDismiss() {
+    if (activeConfusion) {
+      confusionDetector.resetPassage(activeConfusion.anchorType, activeConfusion.anchorRef)
+    }
+    setExplainStatus('idle')
+    setActiveConfusion(confusionQueueRef.current.shift() ?? null)
+  }
+
+  function handleQaAnswer(anchors: SourceAnchor[]) {
+    confusionDetector.notifyQaAnchors(anchors)
+  }
+
   // Fetch existing summary on mount
   useEffect(() => {
     fetch(`/api/summarize/${data.contentId}`)
@@ -254,7 +374,7 @@ function ReaderLayout({ data }: { data: ContentData }) {
     }
   }
 
-  const jumpToTimestamp = useCallback((startSeconds: number) => {
+  const jumpToTimestamp = useCallback((startSeconds: number, _sequence?: number) => {
     if (playerRef.current) {
       playerRef.current.contentWindow?.postMessage(
         JSON.stringify({ event: 'command', func: 'seekTo', args: [startSeconds, true] }),
@@ -331,6 +451,12 @@ function ReaderLayout({ data }: { data: ContentData }) {
             onRetry={triggerSummarize}
             jumpToTimestamp={jumpToTimestamp}
             jumpToParagraph={jumpToParagraph}
+            tutorCards={tutorCards}
+            activeConfusion={activeConfusion}
+            explainStatus={explainStatus}
+            onStyleSelect={handleStyleSelect}
+            onDismiss={handleDismiss}
+            onQaAnswer={handleQaAnswer}
           />
         </div>
       </div>
@@ -790,19 +916,32 @@ function AiDock({
   onRetry,
   jumpToTimestamp,
   jumpToParagraph,
+  tutorCards,
+  activeConfusion,
+  explainStatus,
+  onStyleSelect,
+  onDismiss,
+  onQaAnswer,
 }: {
   data: ContentData
   summary: SummaryResponse | null
   summaryStatus: 'idle' | 'loading' | 'error'
   onSummarize: () => void
   onRetry: () => void
-  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToTimestamp: (startSeconds: number, sequence?: number) => void
   jumpToParagraph: (paragraphIndex: number) => void
+  tutorCards: TutorCard[]
+  activeConfusion: ConfusionEvent | null
+  explainStatus: 'idle' | 'loading' | 'error'
+  onStyleSelect: (style: TutorStyle) => void
+  onDismiss: () => void
+  onQaAnswer: (anchors: SourceAnchor[]) => void
 }) {
-  const [activeTab, setActiveTab] = useState<'summary' | 'qa'>('summary')
+  const [activeTab, setActiveTab] = useState<'summary' | 'qa' | 'tutor'>('summary')
   const tabs = [
     { id: 'summary' as const, label: 'Summary' },
     { id: 'qa' as const, label: 'Q&A' },
+    { id: 'tutor' as const, label: 'Tutor' },
   ]
 
   return (
@@ -844,6 +983,21 @@ function AiDock({
         <QaTab
           contentId={data.contentId}
           jumpToTimestamp={jumpToTimestamp}
+          jumpToParagraph={jumpToParagraph}
+          onAnswerReceived={onQaAnswer}
+        />
+      )}
+
+      {activeTab === 'tutor' && (
+        <TutorTab
+          contentId={data.contentId}
+          contentStatus={data.status}
+          activeConfusion={activeConfusion}
+          onStyleSelect={onStyleSelect}
+          onDismiss={onDismiss}
+          cards={tutorCards}
+          explainStatus={explainStatus}
+          jumpToTimestamp={(s, seq) => jumpToTimestamp(s, seq)}
           jumpToParagraph={jumpToParagraph}
         />
       )}
@@ -1205,10 +1359,12 @@ function QaTab({
   contentId,
   jumpToTimestamp,
   jumpToParagraph,
+  onAnswerReceived,
 }: {
   contentId: string
-  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToTimestamp: (startSeconds: number, sequence?: number) => void
   jumpToParagraph: (paragraphIndex: number) => void
+  onAnswerReceived: (anchors: SourceAnchor[]) => void
 }) {
   const [messages, setMessages] = useState<QaMessage[]>([])
   const [pending, setPending] = useState<PendingMessage | null>(null)
@@ -1260,6 +1416,7 @@ function QaTab({
         const msg: QaMessage = await res.json()
         setMessages((prev) => [...prev, msg])
         setPending(null)
+        if (msg.anchors.length > 0) onAnswerReceived(msg.anchors)
       } catch {
         setPending({ question: trimmed, state: 'error', retryFn: doSubmit })
       }
@@ -1402,7 +1559,7 @@ function QaMessagePair({
   jumpToParagraph,
 }: {
   msg: QaMessage
-  jumpToTimestamp: (startSeconds: number, sequence: number) => void
+  jumpToTimestamp: (startSeconds: number, sequence?: number) => void
   jumpToParagraph: (paragraphIndex: number) => void
 }) {
   return (
